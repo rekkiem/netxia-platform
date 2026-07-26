@@ -7,6 +7,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential curl \
     && rm -rf /var/lib/apt/lists/*
 
+# IMPORTANTE: instalar PyTorch CPU-only ANTES de requirements.txt.
+# sentence-transformers (usado para embeddings de RAG) depende de
+# torch, y por defecto pip instala la variante CUDA (arrastra ~2GB de
+# paquetes nvidia-* que nunca se usan: los LLMs corren en el contenedor
+# de Ollama, no aquí). Al instalar la rueda CPU-only primero, pip ya
+# encuentra la dependencia satisfecha y no descarga la versión GPU.
+RUN pip install --no-cache-dir --break-system-packages torch --index-url https://download.pytorch.org/whl/cpu
+
 COPY conversation-engine/requirements.txt .
 RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 

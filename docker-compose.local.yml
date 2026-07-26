@@ -60,6 +60,11 @@ services:
   voice-service:
     ports:
       - "8010:8000"  # healthcheck HTTP (8090 de AudioSocket ya está publicado en el compose base)
+    environment:
+      # 'tiny' es ~5x más rápido que 'base' en CPU, suficiente para
+      # probar el flujo en desarrollo local. En producción usar 'base'
+      # o superior para mejor precisión de transcripción.
+      STT_MODEL_SIZE: "tiny"
 
   keycloak:
     ports:

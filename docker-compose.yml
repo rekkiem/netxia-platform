@@ -192,6 +192,16 @@ services:
   ollama:
     image: ollama/ollama:0.5.4
     restart: unless-stopped
+    environment:
+      # OLLAMA_MAX_LOADED_MODELS=1: solo un modelo en RAM a la vez. Sin
+      # esto, si el router alterna entre gemma2:2b/llama3.2:3b/mistral:7b
+      # en la misma sesión, Ollama puede mantener varios cargados a la
+      # vez y agotar la RAM en una máquina de 14GB.
+      # OLLAMA_KEEP_ALIVE=5m: descarga el modelo de RAM tras 5 min de
+      # inactividad (por defecto Ollama lo mantiene indefinidamente).
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_KEEP_ALIVE: "5m"
+      OLLAMA_NUM_PARALLEL: "1"
     volumes:
       - ollama_data:/root/.ollama
     deploy:

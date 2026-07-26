@@ -1,6 +1,13 @@
 # Dependencias de desarrollo/testing. Se instalan solo en CI y en el
 # entorno local del desarrollador — nunca dentro de las imágenes Docker
 # de producción (ver Dockerfiles, que solo usan requirements.txt).
+#
+# IMPORTANTE: antes de instalar este archivo, instala PyTorch CPU-only
+# si tu máquina no tiene GPU (la mayoría de los casos en desarrollo):
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Si no lo haces, `sentence-transformers` (usado por conversation-engine
+# para embeddings de RAG) arrastrará la variante CUDA de torch (~2GB de
+# paquetes nvidia-* innecesarios en una máquina sin GPU).
 
 pytest==8.3.4
 pytest-asyncio==0.25.0
