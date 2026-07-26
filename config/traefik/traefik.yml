@@ -1,0 +1,10 @@
+# Configuración estática de Traefik (complementa los flags de CLI en
+# docker-compose.yml). Mantenida por si se prefiere migrar de flags a
+# archivo de configuración.
+api:
+  dashboard: false
+
+log:
+  level: INFO
+
+accessLog: {}

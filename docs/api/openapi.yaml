@@ -1,0 +1,166 @@
+openapi: 3.0.3
+info:
+  title: Netxia Conversational Platform — API Gateway
+  version: 1.0.0
+  description: >
+    Punto de entrada único para administración de tenants y consulta de
+    conversaciones del NCP. La lógica conversacional en sí no se expone
+    aquí: ocurre de forma asíncrona vía eventos (RabbitMQ) entre
+    conversation-engine, voice-service y whatsapp-service.
+servers:
+  - url: https://api.netxia.cl
+    description: Producción
+  - url: http://localhost:8000
+    description: Desarrollo local
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health:
+    get:
+      summary: Healthcheck del gateway
+      security: []
+      responses:
+        "200":
+          description: Servicio operativo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+
+  /v1/tenants/:
+    post:
+      summary: Crear un nuevo tenant (empresa cliente)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantCreateRequest"
+      responses:
+        "201":
+          description: Tenant creado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+
+  /v1/tenants/{tenant_id}:
+    get:
+      summary: Obtener un tenant por ID
+      parameters:
+        - $ref: "#/components/parameters/TenantId"
+      responses:
+        "200":
+          description: Tenant encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "404":
+          description: Tenant no encontrado
+
+  /v1/conversations/:
+    get:
+      summary: Listar conversaciones de un tenant
+      parameters:
+        - $ref: "#/components/parameters/TenantId"
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50 }
+      responses:
+        "200":
+          description: Lista de conversaciones
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ConversationSummary"
+
+  /v1/conversations/{conversation_id}/messages:
+    get:
+      summary: Obtener los mensajes de una conversación
+      parameters:
+        - name: conversation_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Mensajes de la conversación en orden cronológico
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Message"
+        "404":
+          description: Conversación no encontrada o sin mensajes
+
+  /v1/reports/daily/{tenant_id}:
+    get:
+      summary: Reporte diario de métricas de un tenant (analytics-service)
+      parameters:
+        - $ref: "#/components/parameters/TenantId"
+      responses:
+        "200":
+          description: Reporte en texto plano
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  report: { type: string }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Token OIDC emitido por Keycloak (identity-service)
+
+  parameters:
+    TenantId:
+      name: tenant_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  schemas:
+    TenantCreateRequest:
+      type: object
+      required: [name, subdomain]
+      properties:
+        name: { type: string, example: "Divinittys SpA" }
+        subdomain: { type: string, example: "divinittys" }
+        config: { type: object }
+
+    Tenant:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        subdomain: { type: string }
+
+    ConversationSummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string }
+        channel: { type: string, enum: [voice, whatsapp] }
+        status: { type: string, enum: [active, resolved, escalated, abandoned] }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time, nullable: true }
+
+    Message:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        role: { type: string, enum: [user, assistant, system] }
+        content: { type: string }
+        created_at: { type: string, format: date-time }

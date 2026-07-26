@@ -1,0 +1,9 @@
+# Configuración de referencia para Evolution API.
+# La configuración efectiva en producción se pasa por variables de
+# entorno en docker-compose.yml; este archivo documenta las opciones
+# multi-tenant (una instancia por número de WhatsApp / tenant).
+instances:
+  - name: demo
+    webhook_url: http://whatsapp-service:8000/webhook/00000000-0000-0000-0000-000000000001
+    qrcode: true
+    integration: WHATSAPP-BAILEYS

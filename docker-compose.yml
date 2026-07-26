@@ -1,0 +1,369 @@
+x-python-service-common: &python-service-common
+  restart: unless-stopped
+  environment: &python-service-env
+    REDIS_HOST: redis
+    RABBITMQ_HOST: rabbitmq
+    POSTGRES_HOST: postgres
+    POSTGRES_USER: ${POSTGRES_USER}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    POSTGRES_DB: ${POSTGRES_DB}
+    RABBITMQ_USER: ${RABBITMQ_USER}
+    RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+    OLLAMA_HOST: http://ollama:11434
+    EVOLUTION_API_URL: http://evolution-api:8080
+    EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
+    JWT_SECRET: ${JWT_SECRET}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ENVIRONMENT: ${ENVIRONMENT:-production}
+
+networks:
+  netxia-net:
+    driver: bridge
+
+volumes:
+  pg_data:
+  redis_data:
+  rabbitmq_data:
+  ollama_data:
+  n8n_data:
+  grafana_data:
+  prometheus_data:
+  loki_data:
+  keycloak_data:
+  piper_models:
+  letsencrypt:
+
+services:
+  # ---------------------------------------------------------------
+  # Reverse Proxy
+  # ---------------------------------------------------------------
+  traefik:
+    image: traefik:v3.2
+    profiles: ["full"]  # No necesario en desarrollo local (sin dominio/SSL). Actívalo con --profile full
+    restart: unless-stopped
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-admin@netxia.cl}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt:/letsencrypt
+    networks: [netxia-net]
+
+  # ---------------------------------------------------------------
+  # Persistencia y estado
+  # ---------------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
+    ports:
+      - "5432:5432"  # Expuesto para desarrollo local (scripts, DBeaver, etc.). Restringir/quitar en producción si no es necesario.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [netxia-net]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"  # Expuesto para desarrollo local (redis-cli, RedisInsight). Restringir/quitar en producción.
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [netxia-net]
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "5672:5672"    # AMQP, expuesto para debugging local
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [netxia-net]
+
+  # ---------------------------------------------------------------
+  # IAM
+  # ---------------------------------------------------------------
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    restart: unless-stopped
+    command: ["start", "--optimized"]
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      KC_DB_USERNAME: ${POSTGRES_USER}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      KC_HOSTNAME: ${KEYCLOAK_HOSTNAME:-auth.netxia.cl}
+    depends_on: [postgres]
+    volumes:
+      - keycloak_data:/opt/keycloak/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.keycloak.rule=Host(`${KEYCLOAK_HOSTNAME:-auth.netxia.cl}`)"
+      - "traefik.http.routers.keycloak.entrypoints=websecure"
+      - "traefik.http.routers.keycloak.tls.certresolver=letsencrypt"
+    networks: [netxia-net]
+
+  # ---------------------------------------------------------------
+  # Telefonía y WhatsApp
+  # ---------------------------------------------------------------
+  asterisk:
+    # NOTA: el proyecto andrius/asterisk cambió su esquema de tags; el
+    # tag plano "20" ya no está garantizado. "20-cert" es el tag
+    # semántico soportado para la rama 20.x (ver
+    # https://hub.docker.com/r/andrius/asterisk).
+    image: andrius/asterisk:20-cert
+    profiles: ["full"]  # No necesario para probar el flujo LLM/WhatsApp en local. Requiere troncal SIP real.
+    restart: unless-stopped
+    volumes:
+      - ./config/asterisk:/etc/asterisk
+      - ./audio:/var/lib/asterisk/sounds/custom
+    ports:
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+      - "10000-10100:10000-10100/udp"
+      - "8088:8088"
+      # Nota: NO se expone 8090 aquí. Asterisk es quien se CONECTA hacia
+      # voice-service:8090 (ver extensions.conf), no al revés — exponerlo
+      # además chocaría con el puerto ya publicado por voice-service.
+    depends_on: [rabbitmq]
+    networks: [netxia-net]
+
+  evolution-api:
+    # NOTA: el proyecto migró de la organización `atendai` a
+    # `evoapicloud` en Docker Hub durante 2026. Si en el futuro esta
+    # imagen también deja de existir, verifica la imagen vigente en
+    # https://hub.docker.com/r/evoapicloud/evolution-api o la
+    # documentación oficial: https://doc.evolution-api.com
+    image: evoapicloud/evolution-api:latest
+    profiles: ["full"]  # No necesario para probar el flujo de voz/LLM en local. Requiere número de WhatsApp real.
+    restart: unless-stopped
+    environment:
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY}
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: redis://redis:6379/1
+      WEBHOOK_GLOBAL_URL: http://whatsapp-service:8000/webhook/${DEFAULT_TENANT_ID:-00000000-0000-0000-0000-000000000001}
+      WEBHOOK_GLOBAL_ENABLED: "true"
+    volumes:
+      - ./config/evolution-api:/evolution/instances
+    depends_on: [postgres, redis]
+    networks: [netxia-net]
+
+  # ---------------------------------------------------------------
+  # IA
+  # ---------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:0.5.4
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+    networks: [netxia-net]
+
+  llm-service:
+    build:
+      context: ./services
+      dockerfile: llm-service/Dockerfile
+    <<: *python-service-common
+    depends_on: [ollama]
+    networks: [netxia-net]
+
+  voice-service:
+    build:
+      context: ./services
+      dockerfile: voice-service/Dockerfile
+    <<: *python-service-common
+    volumes:
+      - piper_models:/models/piper
+    ports:
+      - "8090:8090"
+    depends_on: [rabbitmq]
+    networks: [netxia-net]
+
+  spam-filter:
+    build:
+      context: ./services
+      dockerfile: spam-filter/Dockerfile
+    <<: *python-service-common
+    depends_on: [redis, rabbitmq]
+    networks: [netxia-net]
+
+  whatsapp-service:
+    build:
+      context: ./services
+      dockerfile: whatsapp-service/Dockerfile
+    <<: *python-service-common
+    # Nota: NO depende del contenedor `evolution-api` — este servicio lo
+    # consume vía HTTP en tiempo de ejecución (EvolutionAPIClient), no
+    # necesita que el contenedor exista para arrancar. Además,
+    # evolution-api es un servicio opcional (profile "full"); ponerlo
+    # aquí rompía `docker compose up` sin ese profile.
+    depends_on: [rabbitmq]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.whatsapp.rule=Host(`api.netxia.cl`) && PathPrefix(`/webhook`)"
+      - "traefik.http.routers.whatsapp.entrypoints=websecure"
+      - "traefik.http.routers.whatsapp.tls.certresolver=letsencrypt"
+    networks: [netxia-net]
+
+  conversation-engine:
+    build:
+      context: ./services
+      dockerfile: conversation-engine/Dockerfile
+    <<: *python-service-common
+    depends_on: [postgres, redis, rabbitmq, llm-service]
+    networks: [netxia-net]
+
+  crm-service:
+    build:
+      context: ./services
+      dockerfile: crm-service/Dockerfile
+    <<: *python-service-common
+    depends_on: [rabbitmq]
+    networks: [netxia-net]
+
+  notification:
+    build:
+      context: ./services
+      dockerfile: notification/Dockerfile
+    <<: *python-service-common
+    environment:
+      <<: *python-service-env
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      WEB3FORMS_ACCESS_KEY: ${WEB3FORMS_ACCESS_KEY}
+      NOTIFICATION_EMAIL: ${NOTIFICATION_EMAIL}
+    depends_on: [rabbitmq]
+    networks: [netxia-net]
+
+  analytics:
+    build:
+      context: ./services
+      dockerfile: analytics/Dockerfile
+    <<: *python-service-common
+    depends_on: [postgres]
+    networks: [netxia-net]
+
+  identity:
+    build:
+      context: ./services
+      dockerfile: identity/Dockerfile
+    <<: *python-service-common
+    depends_on: [keycloak]
+    networks: [netxia-net]
+
+  gateway:
+    build:
+      context: ./services
+      dockerfile: gateway/Dockerfile
+    <<: *python-service-common
+    depends_on: [postgres, identity]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.gateway.rule=Host(`api.netxia.cl`)"
+      - "traefik.http.routers.gateway.entrypoints=websecure"
+      - "traefik.http.routers.gateway.tls.certresolver=letsencrypt"
+    networks: [netxia-net]
+
+  # ---------------------------------------------------------------
+  # Automatización no crítica
+  # ---------------------------------------------------------------
+  n8n:
+    image: n8nio/n8n:1.60.0
+    profiles: ["full"]  # Automatización no crítica, no necesaria para probar el core conversacional en local
+    restart: unless-stopped
+    environment:
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_USER}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_PASSWORD}
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./config/n8n/workflows:/home/node/.n8n/workflows
+    depends_on: [postgres]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.n8n.rule=Host(`n8n.netxia.cl`)"
+      - "traefik.http.routers.n8n.entrypoints=websecure"
+      - "traefik.http.routers.n8n.tls.certresolver=letsencrypt"
+    networks: [netxia-net]
+
+  # ---------------------------------------------------------------
+  # Observabilidad
+  # ---------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    profiles: ["full"]  # Observabilidad — actívala con --profile full cuando quieras ver métricas
+    restart: unless-stopped
+    volumes:
+      - ./config/prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    networks: [netxia-net]
+
+  loki:
+    image: grafana/loki:3.2.1
+    profiles: ["full"]
+    restart: unless-stopped
+    volumes:
+      - loki_data:/loki
+    networks: [netxia-net]
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    profiles: ["full"]
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-changeme}
+    volumes:
+      - grafana_data:/var/lib/grafana
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.grafana.rule=Host(`monitor.netxia.cl`)"
+      - "traefik.http.routers.grafana.entrypoints=websecure"
+      - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
+    depends_on: [prometheus, loki]
+    networks: [netxia-net]
